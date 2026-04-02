@@ -64,8 +64,15 @@ def pad_to_block_size(img: np.ndarray, block_size: int = 8) -> tuple[np.ndarray,
     return padded, h, w
 
 
-def compress_decompress_image(img: np.ndarray, quality: int) -> tuple[np.ndarray, float]:
-    """Apply block DCT + quantization + inverse DCT to whole image."""
+def compress_decompress_image(img: np.ndarray, quality: int) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+    """Apply block DCT + quantization + inverse DCT to whole image.
+
+    Returns:
+        reconstructed: reconstructed image (float32, 0..255)
+        kept_ratio: fraction of non-zero quantized coefficients
+        dct_coeffs: per-pixel-view of DCT coeff magnitudes (cropped to original image size)
+        quantized_coeffs: per-pixel-view of quantized DCT coeffs (cropped)
+    """
     block_size = 8
     padded, h, w = pad_to_block_size(img, block_size=block_size)
     centered = padded.astype(np.float64) - 128.0
@@ -74,6 +81,10 @@ def compress_decompress_image(img: np.ndarray, quality: int) -> tuple[np.ndarray
     nonzero = 0
     total = 0
 
+    # Store full coefficient fields so we can visualize them.
+    dct_coeffs = np.zeros_like(centered)
+    quantized_coeffs = np.zeros_like(centered)
+
     for row in range(0, centered.shape[0], block_size):
         for col in range(0, centered.shape[1], block_size):
             block = centered[row : row + block_size, col : col + block_size]
@@ -81,11 +92,20 @@ def compress_decompress_image(img: np.ndarray, quality: int) -> tuple[np.ndarray
             quantized = np.round(coeff / q)
             nonzero += int(np.count_nonzero(quantized))
             total += quantized.size
+
+            dct_coeffs[row : row + block_size, col : col + block_size] = coeff
+            quantized_coeffs[row : row + block_size, col : col + block_size] = quantized
+
             dequantized = quantized * q
             recon[row : row + block_size, col : col + block_size] = idct2(dequantized)
 
     reconstructed = np.clip(recon + 128.0, 0, 255)
-    return reconstructed[:h, :w].astype(np.float32), nonzero / total
+    return (
+        reconstructed[:h, :w].astype(np.float32),
+        nonzero / total,
+        dct_coeffs[:h, :w],
+        quantized_coeffs[:h, :w],
+    )
 
 
 def psnr(original: np.ndarray, reconstructed: np.ndarray) -> float:
@@ -99,7 +119,7 @@ parser = argparse.ArgumentParser(description="DCT-compress the full grayscale im
 parser.add_argument(
     "--image",
     type=str,
-    default="image.png",
+    default="image2.png",
     help="Path to input image (default: image.png in this folder).",
 )
 parser.add_argument("--quality", type=int, default=50, help="Compression quality 1..100 (higher = better).")
@@ -120,27 +140,31 @@ img = load_grayscale_image(image_path)
 if img.shape[0] < 8 or img.shape[1] < 8:
     raise ValueError("Image must be at least 8x8 pixels.")
 
-reconstructed, kept_ratio = compress_decompress_image(img, quality=args.quality)
+reconstructed, kept_ratio, dct_coeffs, quantized_coeffs = compress_decompress_image(img, quality=args.quality)
 score = psnr(img, reconstructed)
 print(f"Quality={args.quality}, PSNR={score:.2f} dB, kept_coefficients={kept_ratio*100:.2f}%")
 
 # Визуализация
-plt.figure(figsize=(15, 5))
+plt.figure(figsize=(20, 5))
 
-plt.subplot(1, 3, 1)
+plt.subplot(1, 4, 1)
 plt.title("Original")
 plt.imshow(img, cmap='gray', vmin=0, vmax=255)
 plt.axis("off")
 
-plt.subplot(1, 3, 2)
-plt.title(f"Compressed (Q={args.quality})")
+plt.subplot(1, 4, 2)
+plt.title(f"Reconstructed (Q={args.quality})")
 plt.imshow(reconstructed, cmap='gray', vmin=0, vmax=255)
 plt.axis("off")
 
-error_map = np.abs(img - reconstructed)
-plt.subplot(1, 3, 3)
-plt.title("Absolute Error Map")
-plt.imshow(error_map, cmap='hot')
+plt.subplot(1, 4, 3)
+plt.title("DCT")
+plt.imshow(np.log1p(np.abs(dct_coeffs)), cmap='gray')
+plt.axis("off")
+
+plt.subplot(1, 4, 4)
+plt.title("Quantized DCT")
+plt.imshow(np.log1p(np.abs(quantized_coeffs)), cmap='gray')
 plt.axis("off")
 
 plt.show()
